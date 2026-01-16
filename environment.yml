@@ -12,11 +12,15 @@ dependencies:
   - scipy
   - scanpy
   - anndata
+  - openpyxl
+  - xlrd
   - requests
   - pyyaml
   - matplotlib
   - seaborn
   - jupyterlab
+  - python-igraph
+  - leidenalg
   - networkx
   - python-louvain
   - pytorch

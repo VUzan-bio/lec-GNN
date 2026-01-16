@@ -3,11 +3,15 @@ scanpy
 numpy
 pandas
 scipy
+openpyxl
+xlrd
 requests
 PyYAML
 GEOparse
 gseapy
 harmonypy
+igraph
+leidenalg
 networkx
 python-louvain
 arboreto

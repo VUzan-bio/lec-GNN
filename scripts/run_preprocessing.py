@@ -1,8 +1,11 @@
 import logging
+import sys
 from pathlib import Path
 from typing import Dict
 
 import yaml
+
+sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from src.data.preprocessing import LECDataPreprocessor
 
@@ -22,8 +25,16 @@ def main() -> None:
 
     preprocessor = LECDataPreprocessor()
 
-    for dataset in config.get("arrayexpress", []):
+    arrayexpress = sorted(
+        config.get("arrayexpress", []),
+        key=lambda item: item.get("priority", 999) if isinstance(item, dict) else 999,
+    )
+    for dataset in arrayexpress:
         accession = dataset["accession"]
+        status = str(dataset.get("status", "")).lower() if isinstance(dataset, dict) else ""
+        if "deferred" in status:
+            logger.info("Skipping %s (status=%s)", accession, dataset.get("status"))
+            continue
         species = dataset.get("species", "mouse")
         data_dir = Path("data/raw") / accession
         if not data_dir.exists():
@@ -31,8 +42,16 @@ def main() -> None:
             continue
         preprocessor.process_dataset(data_dir, accession, species, source="arrayexpress")
 
-    for dataset in config.get("geo", []):
+    geo = sorted(
+        config.get("geo", []),
+        key=lambda item: item.get("priority", 999) if isinstance(item, dict) else 999,
+    )
+    for dataset in geo:
         accession = dataset["accession"]
+        status = str(dataset.get("status", "")).lower() if isinstance(dataset, dict) else ""
+        if "deferred" in status:
+            logger.info("Skipping %s (status=%s)", accession, dataset.get("status"))
+            continue
         species = dataset.get("species", "human")
         data_dir = Path("data/raw") / accession
         if not data_dir.exists():

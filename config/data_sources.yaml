@@ -5,16 +5,30 @@ arrayexpress:
     species: mouse
     tissue: lymph_node
     description: "LEC subsets (floor, ceiling, medullary, capillary, valve)"
-    citation: "Cohen et al. 2020, Front Cardiovasc Med"
+    citation: "Fujimoto et al. 2020, PLOS Biol"
     url: "https://www.ebi.ac.uk/biostudies/arrayexpress/studies/E-MTAB-8414"
+    priority: 3
+    status: "DEFERRED - requires FASTQ processing for counts"
+    files:
+      - name: "E-MTAB-8414.sdrf.txt"
+        url: "https://www.ebi.ac.uk/biostudies/files/E-MTAB-8414/E-MTAB-8414.sdrf.txt"
+      - name: "S1_Data.xlsx"
+        url: "https://journals.plos.org/plosbiology/article/file?id=10.1371/journal.pbio.3000704.s004&type=supplementary"
+      - name: "S1_Table.xlsx"
+        url: "https://journals.plos.org/plosbiology/article/file?id=10.1371/journal.pbio.3000704.s007&type=supplementary"
+      - name: "S2_Table.xlsx"
+        url: "https://journals.plos.org/plosbiology/article/file?id=10.1371/journal.pbio.3000704.s008&type=supplementary"
+      - name: "S3_Table.xlsx"
+        url: "https://journals.plos.org/plosbiology/article/file?id=10.1371/journal.pbio.3000704.s009&type=supplementary"
 
 geo:
   - accession: GSE148730
-    species: human
-    tissue: dermal_lymphatics
-    description: "LEC activation states (TNF-alpha, IL-1beta stimulation)"
+    species: mouse
+    tissue: lymph_node
+    description: "LEC activation states (WT vs Stab1-/-; inflammatory vs steady-state)"
     citation: "Garnier et al. 2021, Front Immunol"
-    platform: GPL16791
+    platform: GPL21493
+    priority: 1
 
   - accession: GSE282417
     species: human
@@ -22,6 +36,7 @@ geo:
     description: "Shear stress response in cultured LECs"
     citation: "Halin lab 2024 (unpublished)"
     platform: GPL24676
+    priority: 2
 
 gene_databases:
   transcription_factors:
