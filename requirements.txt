@@ -9,6 +9,8 @@ GEOparse
 gseapy
 harmonypy
 networkx
+python-louvain
+arboreto
 torch
 torchvision
 torchaudio

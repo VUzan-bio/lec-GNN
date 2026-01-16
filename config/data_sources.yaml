@@ -26,7 +26,10 @@ geo:
 gene_databases:
   transcription_factors:
     source: AnimalTFDB
-    url: "http://www.bioguo.org/AnimalTFDB/"
+    urls:
+      - "http://bioinfo.life.hust.edu.cn/AnimalTFDB/download/TF/Mus_musculus_TF"
+      - "http://bioinfo.life.hust.edu.cn/AnimalTFDB/download/TF/Mouse_TF"
+      - "https://www.bioguo.org/AnimalTFDB/download/Mus_musculus_TF"
     version: "v4.0"
 
   go_pathways:

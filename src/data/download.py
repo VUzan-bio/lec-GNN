@@ -1,7 +1,8 @@
 import logging
+import re
 from io import StringIO
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import pandas as pd
 import requests
@@ -87,6 +88,109 @@ class DatasetDownloader:
                 if chunk:
                     handle.write(chunk)
 
+    def _looks_like_html(self, path: Path) -> bool:
+        """Check if a downloaded file looks like an HTML error page."""
+        try:
+            with path.open("rb") as handle:
+                snippet = handle.read(2048).lower()
+        except OSError:
+            return False
+        return b"<html" in snippet or b"<!doctype html" in snippet
+
+    def _extract_file_names(self, payload: object) -> List[str]:
+        """Recursively collect file-like names from a BioStudies response."""
+        names: List[str] = []
+
+        def _walk(node: object) -> None:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    key_lower = key.lower()
+                    if key_lower in {"filename", "file_name", "name"} and isinstance(value, str):
+                        if "." in value:
+                            names.append(value)
+                    else:
+                        _walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    _walk(item)
+
+        _walk(payload)
+        return sorted(set(names))
+
+    def _fetch_biostudies_file_list(self, accession: str) -> List[str]:
+        """Fetch file list from BioStudies API or HTML listing."""
+        api_urls = [
+            f"https://www.ebi.ac.uk/biostudies/api/v1/studies/{accession}",
+            f"https://www.ebi.ac.uk/biostudies/api/v1/studies/{accession}?format=json",
+        ]
+        for url in api_urls:
+            try:
+                response = requests.get(url, timeout=60)
+                response.raise_for_status()
+                payload = response.json()
+            except Exception:
+                continue
+            file_names = self._extract_file_names(payload)
+            if file_names:
+                return file_names
+
+        listing_url = f"https://www.ebi.ac.uk/biostudies/arrayexpress/studies/{accession}/files"
+        try:
+            response = requests.get(listing_url, timeout=60)
+            response.raise_for_status()
+        except Exception:
+            return []
+
+        matches = re.findall(r'href="([^"]+)"', response.text)
+        file_names = []
+        for match in matches:
+            if accession in match:
+                clean = match.split("?", 1)[0]
+                file_names.append(Path(clean).name)
+        return sorted(set(file_names))
+
+    def _choose_arrayexpress_files(self, accession: str, file_names: Iterable[str]) -> List[str]:
+        """Select processed counts and SDRF files from available names."""
+        names = list(file_names)
+        sdrf_candidates = [name for name in names if name.lower().endswith(".sdrf.txt")]
+        processed_candidates = [name for name in names if "processed" in name.lower()]
+
+        selected: List[str] = []
+        if sdrf_candidates:
+            selected.append(sdrf_candidates[0])
+        else:
+            selected.append(f"{accession}.sdrf.txt")
+
+        if processed_candidates:
+            zip_candidates = [name for name in processed_candidates if name.lower().endswith(".zip")]
+            selected.append(zip_candidates[0] if zip_candidates else processed_candidates[0])
+        else:
+            selected.append(f"{accession}.processed.1.zip")
+
+        return selected
+
+    def _get_tf_urls(self) -> List[str]:
+        """Collect TF database URLs from config with fallbacks."""
+        tf_config = self.config.get("gene_databases", {}).get("transcription_factors", {})
+        urls: List[str] = []
+        if isinstance(tf_config.get("urls"), list):
+            urls.extend([str(url) for url in tf_config["urls"]])
+        if isinstance(tf_config.get("url"), str):
+            urls.append(tf_config["url"])
+        fallback_urls = [
+            "http://bioinfo.life.hust.edu.cn/AnimalTFDB/download/TF/Mus_musculus_TF",
+            "http://bioinfo.life.hust.edu.cn/AnimalTFDB/download/TF/Mouse_TF",
+            "https://www.bioguo.org/AnimalTFDB/download/Mus_musculus_TF",
+        ]
+        urls.extend(fallback_urls)
+        seen = set()
+        unique_urls = []
+        for url in urls:
+            if url and url not in seen:
+                unique_urls.append(url)
+                seen.add(url)
+        return unique_urls
+
     def download_arrayexpress(self, accession: str) -> Path:
         """
         Download dataset from ArrayExpress (BioStudies interface).
@@ -107,25 +211,40 @@ class DatasetDownloader:
         output_path = self.output_dir / accession
         output_path.mkdir(exist_ok=True)
 
-        files_to_download = [
-            f"{accession}.processed.1.zip",
-            f"{accession}.sdrf.txt",
-        ]
+        file_names = self._fetch_biostudies_file_list(accession)
+        if file_names:
+            logger.info("  Found %s files in BioStudies listing", len(file_names))
+        else:
+            logger.warning("  No BioStudies file listing found, using default filenames")
+        files_to_download = self._choose_arrayexpress_files(accession, file_names)
 
         for filename in files_to_download:
-            file_url = f"{base_url}/{filename}"
-            local_path = output_path / filename
+            file_path = filename.lstrip("/")
+            file_url = f"{base_url}/{file_path}"
+            local_path = output_path / Path(file_path).name
 
             if local_path.exists():
                 logger.info("  %s already exists, skipping", filename)
                 continue
 
             logger.info("  Downloading %s...", filename)
-            self._download_file(file_url, local_path)
+            try:
+                self._download_file(file_url, local_path)
+            except Exception as exc:
+                logger.error("  Failed to download %s: %s", filename, exc)
+                continue
+
+            if self._looks_like_html(local_path):
+                logger.error("  %s looks like an HTML error page. Check file listing.", filename)
+                local_path.unlink(missing_ok=True)
+                continue
 
         import zipfile
 
         for zipfile_path in output_path.glob("*.zip"):
+            if not zipfile.is_zipfile(zipfile_path):
+                logger.warning("  Skipping %s: not a valid zip file", zipfile_path.name)
+                continue
             logger.info("  Extracting %s", zipfile_path.name)
             with zipfile.ZipFile(zipfile_path, "r") as zip_ref:
                 zip_ref.extractall(output_path)
@@ -172,6 +291,7 @@ class DatasetDownloader:
         """
         if GEOparse is None:
             raise ImportError("GEOparse is not installed. Install it to download GEO datasets.")
+        assert GEOparse is not None
 
         logger.info("Downloading GEO dataset %s", accession)
 
@@ -219,19 +339,32 @@ class DatasetDownloader:
 
         databases: Dict[str, pd.DataFrame] = {}
 
-        tf_url = "http://www.bioguo.org/AnimalTFDB/download/Mus_musculus_TF"
         tf_path = db_dir / "mouse_tfs_animalTFDB.csv"
 
         if not tf_path.exists():
             logger.info("  Downloading mouse TF database...")
-            response = requests.get(tf_url, timeout=60)
-            response.raise_for_status()
-            tf_df = pd.read_csv(
-                StringIO(response.text),
-                sep="\t",
-                header=None,
-                names=["ensembl", "symbol", "family", "dbds"],
-            )
+            tf_df = None
+            tf_urls = self._get_tf_urls()
+            for tf_url in tf_urls:
+                try:
+                    response = requests.get(tf_url, timeout=60)
+                    response.raise_for_status()
+                    if "<html" in response.text.lower():
+                        raise ValueError("HTML response received")
+                    tf_df = pd.read_csv(
+                        StringIO(response.text),
+                        sep="\t",
+                        header=None,
+                        names=["ensembl", "symbol", "family", "dbds"],
+                    )
+                    break
+                except Exception as exc:
+                    logger.warning("  TF download failed from %s: %s", tf_url, exc)
+                    tf_df = None
+
+            if tf_df is None:
+                raise RuntimeError("Unable to download TF database from configured URLs.")
+
             tf_df.to_csv(tf_path, index=False)
         else:
             tf_df = pd.read_csv(tf_path)
@@ -273,7 +406,7 @@ class DatasetDownloader:
                             {"pathway": name, "go_id": go_id, "gene": gene, "source_set": set_name}
                         )
 
-            go_df = pd.DataFrame(pathway_genes)
+            go_df = pd.DataFrame(pathway_genes, columns=["pathway", "go_id", "gene", "source_set"])
             go_df.to_csv(go_path, index=False)
         else:
             go_df = pd.read_csv(go_path)
