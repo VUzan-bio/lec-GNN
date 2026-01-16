@@ -1,6 +1,6 @@
 # LEC Trafficking GNN Project
 
-Production-ready repository for modeling lymphatic endothelial cell (LEC) trafficking competence using scRNA-seq, gene regulatory network (GRN) inference, and graph neural networks (GNNs).
+Project for modeling lymphatic endothelial cell (LEC) trafficking competence using scRNA-seq, gene regulatory network (GRN) inference, and graph neural networks (GNNs).
 
 Scientific goal: infer GRNs linking transcription factors, glycosylation enzymes, and trafficking genes, then predict LEC phenotypes that support dendritic cell trafficking.
 
