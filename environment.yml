@@ -1,0 +1,32 @@
+name: lec-trafficking-gnn
+channels:
+  - conda-forge
+  - pytorch
+  - pyg
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - pandas
+  - scipy
+  - scanpy
+  - anndata
+  - requests
+  - pyyaml
+  - matplotlib
+  - seaborn
+  - jupyterlab
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pip:
+      - torch-geometric
+      - scvi-tools
+      - GEOparse
+      - gseapy
+      - harmonypy
+      - pytest
+      - mypy
+      - types-PyYAML
+      - types-requests

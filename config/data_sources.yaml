@@ -1,0 +1,40 @@
+# Data source configuration for LEC trafficking project
+
+arrayexpress:
+  - accession: E-MTAB-8414
+    species: mouse
+    tissue: lymph_node
+    description: "LEC subsets (floor, ceiling, medullary, capillary, valve)"
+    citation: "Cohen et al. 2020, Front Cardiovasc Med"
+    url: "https://www.ebi.ac.uk/biostudies/arrayexpress/studies/E-MTAB-8414"
+
+geo:
+  - accession: GSE148730
+    species: human
+    tissue: dermal_lymphatics
+    description: "LEC activation states (TNF-alpha, IL-1beta stimulation)"
+    citation: "Garnier et al. 2021, Front Immunol"
+    platform: GPL16791
+
+  - accession: GSE282417
+    species: human
+    tissue: dermal_lymphatics
+    description: "Shear stress response in cultured LECs"
+    citation: "Halin lab 2024 (unpublished)"
+    platform: GPL24676
+
+gene_databases:
+  transcription_factors:
+    source: AnimalTFDB
+    url: "http://www.bioguo.org/AnimalTFDB/"
+    version: "v4.0"
+
+  go_pathways:
+    source: MSigDB
+    collection: "GO_Biological_Process_2023"
+    organism: mouse
+
+  glycosylation:
+    source: GlycoGene_DB
+    url: "https://acgg.asia/db2/ggdb/"
+    manual_curation: true

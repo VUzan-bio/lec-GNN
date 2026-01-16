@@ -1,0 +1,38 @@
+# Quality control and preprocessing parameters
+
+random_seed: 42
+
+quality_control:
+  # Cell-level filters
+  min_genes_per_cell: 200
+  max_genes_per_cell: 6000
+  min_counts_per_cell: 500
+  max_mitochondrial_pct: 15
+
+  # Gene-level filters
+  min_cells_per_gene: 10
+
+normalization:
+  method: "log1p"
+  target_sum: 10000
+
+  highly_variable_genes:
+    n_top_genes: 2000
+    flavor: "seurat_v3"
+
+batch_correction:
+  method: "harmony"
+  batch_key: "dataset"
+
+clustering:
+  resolution: 0.5
+  n_neighbors: 15
+  n_pcs: 50
+
+cell_type_annotation:
+  marker_genes:
+    floor_LEC: ["Ccl21a", "Madcam1", "Lyve1"]
+    ceiling_LEC: ["Cldn5", "Cd36", "Fabp4"]
+    valve_LEC: ["Foxc2", "Gja4", "Nrg1"]
+    capillary_LEC: ["Pdpn", "Vegfc", "Flt4"]
+    medullary_LEC: ["Marco", "Cxcl12", "Ccl19"]

@@ -1,0 +1,25 @@
+# Data and results
+/data/raw/
+/data/processed/
+/data/external/
+/results/
+
+# Logs
+*.log
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Env
+.venv/
+.env/
+
+# OS
+.DS_Store
+Thumbs.db
