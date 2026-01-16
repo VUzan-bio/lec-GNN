@@ -741,7 +741,9 @@ class LECDataPreprocessor:
         adata = self.normalize(adata)
 
         n_pcs = int(self.cluster_params.get("n_pcs", 50))
-        sc.tl.pca(adata, n_comps=n_pcs, use_highly_variable=True, random_state=self.random_seed)
+        max_pcs = max(1, min(n_pcs, adata.n_obs - 1, adata.n_vars - 1))
+        use_hvg = not self._is_bulk_like(adata)
+        sc.tl.pca(adata, n_comps=max_pcs, use_highly_variable=use_hvg, random_state=self.random_seed)
 
         adata = self.integrate_batches(adata)
 

@@ -21,8 +21,8 @@ class GRNInferenceEngine:
     def __init__(
         self,
         adata: anndata.AnnData,
-        tf_list_path: str = "data/external/mouse_tfs_animalTFDB.csv",
-        pathway_genes_path: str = "data/external/go_pathways_trafficking.csv",
+        tf_list_path: Optional[str] = None,
+        pathway_genes_path: Optional[str] = None,
     ) -> None:
         """
         Initialize GRN inference engine.
@@ -33,12 +33,75 @@ class GRNInferenceEngine:
             pathway_genes_path: Path to GO pathway gene sets
         """
         self.adata = adata
-        self.tf_list = self._load_tf_list(tf_list_path)
-        self.pathway_genes = self._load_pathway_genes(pathway_genes_path)
+        self.species = self._infer_species()
+        tf_path = self._resolve_tf_list_path(tf_list_path)
+        self.tf_list = self._load_tf_list(tf_path)
+        pathway_path = self._resolve_pathway_genes_path(pathway_genes_path)
+        self.pathway_genes = self._load_pathway_genes(pathway_path) if pathway_path else []
 
         logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-    def _load_tf_list(self, path: str) -> List[str]:
+    def _infer_species(self) -> Optional[str]:
+        """Infer species from adata.obs when available."""
+        if "species" in self.adata.obs:
+            values = self.adata.obs["species"].dropna().astype(str).str.lower().unique()
+            if len(values) > 0:
+                return values[0]
+        return None
+
+    def _resolve_tf_list_path(self, path: Optional[str]) -> Path:
+        """Resolve TF list path with species-aware defaults."""
+        if path:
+            resolved = Path(path)
+            if resolved.exists():
+                return resolved
+            raise FileNotFoundError(f"TF list file not found: {resolved}")
+
+        candidates: List[Path] = []
+        if self.species == "human":
+            candidates.extend(
+                [
+                    Path("data/external/human_tfs.csv"),
+                    Path("data/external/human_tfs_animalTFDB.csv"),
+                ]
+            )
+        elif self.species == "mouse":
+            candidates.extend(
+                [
+                    Path("data/external/mouse_tfs_animalTFDB.csv"),
+                    Path("data/external/mouse_tfs.csv"),
+                ]
+            )
+        else:
+            candidates.append(Path("data/external/mouse_tfs_animalTFDB.csv"))
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+        raise FileNotFoundError(
+            "TF list file not found. Provide one via --tf_list, or place it in data/external/"
+        )
+
+    def _resolve_pathway_genes_path(self, path: Optional[str]) -> Optional[Path]:
+        """Resolve pathway gene file path."""
+        if path:
+            resolved = Path(path)
+            if resolved.exists():
+                return resolved
+            raise FileNotFoundError(f"Pathway gene file not found: {resolved}")
+
+        candidates = [
+            Path("data/external/go_pathways_trafficking.csv"),
+            Path("data/external/pathway_genes.csv"),
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        logger.warning("Pathway gene file not found; proceeding without pathway genes.")
+        return None
+
+    def _load_tf_list(self, path: Path) -> List[str]:
         """Load transcription factor gene symbols."""
         tf_df = pd.read_csv(path)
         if "symbol" in tf_df.columns:
@@ -51,9 +114,13 @@ class GRNInferenceEngine:
         tfs_present = [tf for tf in tfs if tf in self.adata.var_names]
 
         logger.info("Loaded %s/%s TFs present in dataset", len(tfs_present), len(tfs))
+        if len(tfs_present) == 0:
+            raise ValueError(
+                "TF list has no overlap with dataset genes. Check species or gene symbols."
+            )
         return tfs_present
 
-    def _load_pathway_genes(self, path: str) -> List[str]:
+    def _load_pathway_genes(self, path: Path) -> List[str]:
         """Load trafficking/glycosylation pathway genes from GO."""
         pathway_df = pd.read_csv(path)
         if "gene" not in pathway_df.columns:
@@ -123,19 +190,47 @@ class GRNInferenceEngine:
 
         candidates = sorted(set(self.tf_list + self.pathway_genes))
 
-        if use_highly_variable and len(candidates) < min_genes:
-            hvgs = self._get_highly_variable_genes(adata_subset)
-            for gene in hvgs:
-                if gene not in candidates:
-                    candidates.append(gene)
-                if len(candidates) >= min_genes:
-                    break
-
         genes_present = [gene for gene in candidates if gene in adata_subset.var_names]
+
+        needs_non_tf = all(gene in self.tf_list for gene in genes_present)
+        needs_more = len(genes_present) < min_genes
+
+        if (use_highly_variable or needs_more or needs_non_tf) and adata_subset.n_vars > len(genes_present):
+            logger.info(
+                "  Expanding gene set with HVGs/variance (need_non_tf=%s, need_more=%s)",
+                needs_non_tf,
+                needs_more,
+            )
+            extra_pool: List[str] = []
+            hvgs = self._get_highly_variable_genes(adata_subset)
+            extra_pool.extend([gene for gene in hvgs if gene not in genes_present])
+
+            if len(extra_pool) < min_genes:
+                remaining = [
+                    gene
+                    for gene in adata_subset.var_names
+                    if gene not in genes_present and gene not in extra_pool
+                ]
+                extra_pool.extend(self._rank_genes_by_variance(adata_subset, remaining))
+
+            for gene in extra_pool:
+                if gene not in genes_present:
+                    genes_present.append(gene)
+                if (not needs_more or len(genes_present) >= min_genes) and any(
+                    g not in self.tf_list for g in genes_present
+                ):
+                    break
 
         if len(genes_present) > max_genes:
             ranked = self._rank_genes_by_variance(adata_subset, genes_present)
             genes_present = ranked[:max_genes]
+
+        if len(genes_present) < 2:
+            raise ValueError("Need at least 2 genes for GRN inference.")
+        if all(gene in self.tf_list for gene in genes_present):
+            raise ValueError(
+                "No non-TF target genes selected. Provide pathway genes or enable HVG expansion."
+            )
 
         logger.info("  Selected %s genes for GRN inference", len(genes_present))
         logger.info("    TFs: %s", len([g for g in genes_present if g in self.tf_list]))
@@ -166,14 +261,22 @@ class GRNInferenceEngine:
         tfs_in_matrix = [tf for tf in self.tf_list if tf in expr_matrix.columns]
         logger.info("  Using %s TFs as regulators", len(tfs_in_matrix))
 
-        network = grnboost2(
-            expression_data=expr_matrix,
-            tf_names=tfs_in_matrix,
-            verbose=True,
-            seed=seed,
-            n_jobs=n_workers,
-            client_or_address=None,
-        )
+        kwargs = {
+            "expression_data": expr_matrix,
+            "tf_names": tfs_in_matrix,
+            "verbose": True,
+            "seed": seed,
+            "client_or_address": None,
+        }
+        try:
+            import inspect
+
+            if "n_jobs" in inspect.signature(grnboost2).parameters:
+                kwargs["n_jobs"] = n_workers
+        except (ValueError, TypeError):
+            pass
+
+        network = grnboost2(**kwargs)
 
         network = network.rename(columns={"regulator": "TF"})
         logger.info("  Inferred %s TF-target interactions", len(network))
@@ -326,6 +429,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Infer gene regulatory network")
     parser.add_argument("--adata", required=True, help="Path to preprocessed .h5ad file")
     parser.add_argument("--output", required=True, help="Output path for GRN (without extension)")
+    parser.add_argument("--tf_list", default=None, help="Path to TF list CSV (symbol/gene column)")
+    parser.add_argument(
+        "--pathway_genes",
+        default=None,
+        help="Path to pathway genes CSV (gene column). If omitted, defaults are used.",
+    )
     parser.add_argument("--cell_type", default=None, help="Cell type subset (optional)")
     parser.add_argument("--n_permutations", type=int, default=0, help="Number of permutations (0=skip)")
     parser.add_argument("--n_workers", type=int, default=4, help="Workers for GRNBoost2")
@@ -338,7 +447,11 @@ if __name__ == "__main__":
 
     adata = sc.read_h5ad(args.adata)
 
-    engine = GRNInferenceEngine(adata)
+    engine = GRNInferenceEngine(
+        adata,
+        tf_list_path=args.tf_list,
+        pathway_genes_path=args.pathway_genes,
+    )
     expr_matrix = engine.prepare_expression_matrix(
         cell_subset=args.cell_type,
         use_highly_variable=args.use_hvg,
