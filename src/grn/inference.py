@@ -23,6 +23,7 @@ class GRNInferenceEngine:
         adata: anndata.AnnData,
         tf_list_path: Optional[str] = None,
         pathway_genes_path: Optional[str] = None,
+        gene_universe_path: Optional[str] = None,
     ) -> None:
         """
         Initialize GRN inference engine.
@@ -35,7 +36,16 @@ class GRNInferenceEngine:
         self.adata = adata
         self.species = self._infer_species()
         tf_path = self._resolve_tf_list_path(tf_list_path)
-        self.tf_list = self._load_tf_list(tf_path)
+        tf_list, tf_gene_universe = self._load_tf_list(tf_path)
+        self.tf_list = tf_list
+
+        gene_universe = None
+        if gene_universe_path:
+            gene_universe = self._load_gene_universe(Path(gene_universe_path))
+        elif tf_gene_universe:
+            gene_universe = tf_gene_universe
+        self.gene_universe = gene_universe or []
+
         pathway_path = self._resolve_pathway_genes_path(pathway_genes_path)
         self.pathway_genes = self._load_pathway_genes(pathway_path) if pathway_path else []
 
@@ -101,24 +111,43 @@ class GRNInferenceEngine:
         logger.warning("Pathway gene file not found; proceeding without pathway genes.")
         return None
 
-    def _load_tf_list(self, path: Path) -> List[str]:
+    def _load_tf_list(self, path: Path) -> Tuple[List[str], Optional[List[str]]]:
         """Load transcription factor gene symbols."""
         tf_df = pd.read_csv(path)
         if "symbol" in tf_df.columns:
-            tfs = tf_df["symbol"].astype(str).unique().tolist()
+            genes = tf_df["symbol"].astype(str)
         elif "gene" in tf_df.columns:
-            tfs = tf_df["gene"].astype(str).unique().tolist()
+            genes = tf_df["gene"].astype(str)
         else:
             raise ValueError("TF file must contain a 'symbol' or 'gene' column")
 
+        gene_universe: Optional[List[str]] = None
+        if "is_tf" in tf_df.columns:
+            tf_mask = tf_df["is_tf"].astype(bool)
+            tfs = genes[tf_mask].unique().tolist()
+            gene_universe = genes.unique().tolist()
+        elif "regulator" in tf_df.columns:
+            tf_mask = tf_df["regulator"].astype(bool)
+            tfs = genes[tf_mask].unique().tolist()
+            gene_universe = genes.unique().tolist()
+        elif "tf" in tf_df.columns:
+            tf_mask = tf_df["tf"].astype(bool)
+            tfs = genes[tf_mask].unique().tolist()
+            gene_universe = genes.unique().tolist()
+        else:
+            tfs = genes.unique().tolist()
+
         tfs_present = [tf for tf in tfs if tf in self.adata.var_names]
+        gene_universe_present = (
+            [gene for gene in gene_universe if gene in self.adata.var_names] if gene_universe else None
+        )
 
         logger.info("Loaded %s/%s TFs present in dataset", len(tfs_present), len(tfs))
         if len(tfs_present) == 0:
             raise ValueError(
                 "TF list has no overlap with dataset genes. Check species or gene symbols."
             )
-        return tfs_present
+        return tfs_present, gene_universe_present
 
     def _load_pathway_genes(self, path: Path) -> List[str]:
         """Load trafficking/glycosylation pathway genes from GO."""
@@ -130,6 +159,19 @@ class GRNInferenceEngine:
         genes_present = [gene for gene in genes if gene in self.adata.var_names]
 
         logger.info("Loaded %s pathway genes present in dataset", len(genes_present))
+        return genes_present
+
+    def _load_gene_universe(self, path: Path) -> List[str]:
+        """Load a gene universe list from CSV."""
+        gene_df = pd.read_csv(path)
+        if "symbol" in gene_df.columns:
+            genes = gene_df["symbol"].astype(str).unique().tolist()
+        elif "gene" in gene_df.columns:
+            genes = gene_df["gene"].astype(str).unique().tolist()
+        else:
+            raise ValueError("Gene universe file must contain a 'symbol' or 'gene' column")
+        genes_present = [gene for gene in genes if gene in self.adata.var_names]
+        logger.info("Loaded %s/%s gene universe entries present in dataset", len(genes_present), len(genes))
         return genes_present
 
     def _get_highly_variable_genes(self, adata: anndata.AnnData) -> List[str]:
@@ -188,7 +230,7 @@ class GRNInferenceEngine:
             adata_subset = self.adata.copy()
             logger.info("  Using all %s cells", adata_subset.n_obs)
 
-        candidates = sorted(set(self.tf_list + self.pathway_genes))
+        candidates = sorted(set(self.gene_universe + self.pathway_genes + self.tf_list))
 
         genes_present = [gene for gene in candidates if gene in adata_subset.var_names]
 
@@ -222,8 +264,27 @@ class GRNInferenceEngine:
                     break
 
         if len(genes_present) > max_genes:
-            ranked = self._rank_genes_by_variance(adata_subset, genes_present)
-            genes_present = ranked[:max_genes]
+            tfs_present = [gene for gene in genes_present if gene in self.tf_list]
+            non_tfs = [gene for gene in genes_present if gene not in self.tf_list]
+
+            if len(tfs_present) >= max_genes:
+                logger.warning(
+                    "  TF count (%s) exceeds max_genes (%s); trimming TFs by variance.",
+                    len(tfs_present),
+                    max_genes,
+                )
+                ranked_tfs = self._rank_genes_by_variance(adata_subset, tfs_present)
+                genes_present = ranked_tfs[:max_genes]
+            else:
+                ranked_non_tfs = self._rank_genes_by_variance(adata_subset, non_tfs)
+                slots = max_genes - len(tfs_present)
+                genes_present = tfs_present + ranked_non_tfs[:slots]
+
+            if all(gene in self.tf_list for gene in genes_present) and non_tfs:
+                logger.warning("  No non-TF targets retained after trimming; forcing one non-TF gene.")
+                ranked_non_tfs = self._rank_genes_by_variance(adata_subset, non_tfs)
+                if ranked_non_tfs:
+                    genes_present = genes_present[:-1] + [ranked_non_tfs[0]]
 
         if len(genes_present) < 2:
             raise ValueError("Need at least 2 genes for GRN inference.")
@@ -244,6 +305,7 @@ class GRNInferenceEngine:
         expr_matrix: pd.DataFrame,
         n_workers: int = 4,
         seed: int = 42,
+        backend: str = "auto",
         allow_fallback: bool = True,
     ) -> pd.DataFrame:
         """
@@ -253,6 +315,7 @@ class GRNInferenceEngine:
             expr_matrix: cells x genes DataFrame
             n_workers: Number of parallel workers
             seed: Random seed for reproducibility
+            backend: "auto" (GRNBoost2 then fallback), "grnboost2", or "sklearn"
             allow_fallback: Allow fallback to scikit-learn GBM if GRNBoost2 fails
 
         Returns:
@@ -274,6 +337,13 @@ class GRNInferenceEngine:
                 "No non-TF targets available for GRNBoost2. Add pathway genes or enable HVG expansion."
             )
 
+        if backend not in {"auto", "grnboost2", "sklearn"}:
+            raise ValueError(f"Unknown backend '{backend}'. Use auto, grnboost2, or sklearn.")
+
+        if backend == "sklearn":
+            logger.info("Using sklearn GBM backend (skipping GRNBoost2).")
+            return self._infer_grn_gbm_fallback(expr_matrix, tfs_in_matrix, targets, seed)
+
         kwargs = {
             "expression_data": expr_matrix,
             "tf_names": tfs_in_matrix,
@@ -292,7 +362,7 @@ class GRNInferenceEngine:
         try:
             network = grnboost2(**kwargs)
         except Exception as exc:  # pragma: no cover - runtime fallback
-            if not allow_fallback:
+            if backend == "grnboost2" or not allow_fallback:
                 raise
             logger.warning("GRNBoost2 failed (%s). Falling back to sklearn GBM.", exc)
             return self._infer_grn_gbm_fallback(expr_matrix, tfs_in_matrix, targets, seed)
@@ -477,6 +547,11 @@ if __name__ == "__main__":
     parser.add_argument("--output", required=True, help="Output path for GRN (without extension)")
     parser.add_argument("--tf_list", default=None, help="Path to TF list CSV (symbol/gene column)")
     parser.add_argument(
+        "--gene_universe",
+        default=None,
+        help="Path to gene universe CSV (symbol/gene column) to expand candidate genes.",
+    )
+    parser.add_argument(
         "--pathway_genes",
         default=None,
         help="Path to pathway genes CSV (gene column). If omitted, defaults are used.",
@@ -485,9 +560,27 @@ if __name__ == "__main__":
     parser.add_argument("--n_permutations", type=int, default=0, help="Number of permutations (0=skip)")
     parser.add_argument("--n_workers", type=int, default=4, help="Workers for GRNBoost2")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--backend",
+        choices=["auto", "grnboost2", "sklearn"],
+        default="auto",
+        help="GRN inference backend: auto (default), grnboost2, or sklearn",
+    )
     parser.add_argument("--use_hvg", action="store_true", help="Include HVGs to reach min genes")
     parser.add_argument("--min_genes", type=int, default=400, help="Minimum genes for GRN")
     parser.add_argument("--max_genes", type=int, default=800, help="Maximum genes for GRN")
+    parser.add_argument(
+        "--filter_method",
+        choices=["percentile", "pvalue"],
+        default=None,
+        help="Filtering method for high-confidence edges",
+    )
+    parser.add_argument(
+        "--filter_threshold",
+        type=float,
+        default=None,
+        help="Threshold for filtering (percentile or p-value depending on method)",
+    )
     parser.add_argument(
         "--no_fallback",
         action="store_true",
@@ -502,6 +595,7 @@ if __name__ == "__main__":
         adata,
         tf_list_path=args.tf_list,
         pathway_genes_path=args.pathway_genes,
+        gene_universe_path=args.gene_universe,
     )
     expr_matrix = engine.prepare_expression_matrix(
         cell_subset=args.cell_type,
@@ -514,6 +608,7 @@ if __name__ == "__main__":
         expr_matrix,
         n_workers=args.n_workers,
         seed=args.seed,
+        backend=args.backend,
         allow_fallback=not args.no_fallback,
     )
 
@@ -524,14 +619,18 @@ if __name__ == "__main__":
             seed=args.seed,
             n_workers=max(1, args.n_workers // 2),
         )
+        method = args.filter_method or "pvalue"
+        threshold = args.filter_threshold if args.filter_threshold is not None else 0.01
         grn_filtered = engine.filter_high_confidence_edges(
             grn,
             null_dist=null_dist,
-            method="pvalue",
-            threshold=0.01,
+            method=method,
+            threshold=threshold,
         )
     else:
-        grn_filtered = engine.filter_high_confidence_edges(grn, method="percentile", threshold=0.85)
+        method = args.filter_method or "percentile"
+        threshold = args.filter_threshold if args.filter_threshold is not None else 0.85
+        grn_filtered = engine.filter_high_confidence_edges(grn, method=method, threshold=threshold)
 
     engine.save_network(grn_filtered, args.output)
 
