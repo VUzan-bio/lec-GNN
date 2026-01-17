@@ -24,12 +24,15 @@ class GRNAnalyzer:
         """Convert GRN to a directed graph."""
         graph = nx.DiGraph()
         for _, row in self.grn.iterrows():
-            graph.add_edge(row["TF"], row["target"], weight=row["importance"])
+            attrs = {"weight": row["importance"]}
+            if "edge_type" in self.grn.columns:
+                attrs["edge_type"] = row["edge_type"]
+            graph.add_edge(row["TF"], row["target"], **attrs)
 
         logger.info("Built graph: %s nodes, %s edges", graph.number_of_nodes(), graph.number_of_edges())
         return graph
 
-    def compute_centrality_metrics(self) -> pd.DataFrame:
+    def compute_centrality_metrics(self, undirected_betweenness: bool = False) -> pd.DataFrame:
         """
         Compute centrality measures for each gene.
 
@@ -41,7 +44,13 @@ class GRNAnalyzer:
         pagerank = nx.pagerank(self.graph, weight="weight")
         in_degree = dict(self.graph.in_degree())
         out_degree = dict(self.graph.out_degree())
-        betweenness = nx.betweenness_centrality(self.graph, weight="weight")
+
+        betweenness_graph = self.graph.to_undirected() if undirected_betweenness else self.graph
+        betweenness_graph = betweenness_graph.copy()
+        for _, _, data in betweenness_graph.edges(data=True):
+            weight = data.get("weight", 1.0)
+            data["distance"] = 1.0 / weight if weight and weight > 0 else 1.0
+        betweenness = nx.betweenness_centrality(betweenness_graph, weight="distance")
 
         genes = list(self.graph.nodes())
         centrality_df = pd.DataFrame(
@@ -54,8 +63,34 @@ class GRNAnalyzer:
             }
         )
 
-        glyco_genes = ["Galnt1", "Galnt2", "St3gal1", "Gcnt1", "C1galt1"]
-        trafficking_genes = ["Ccl21a", "Lyve1", "Cd274", "Alcam"]
+        glyco_genes = [
+            "Galnt1",
+            "Galnt2",
+            "St3gal1",
+            "Gcnt1",
+            "C1galt1",
+            "GALNT1",
+            "GALNT2",
+            "ST6GALNAC3",
+            "A3GALT2",
+            "B3GNT7",
+            "GCNT1",
+            "C1GALT1",
+        ]
+        trafficking_genes = [
+            "Ccl21a",
+            "Lyve1",
+            "Cd274",
+            "Alcam",
+            "VCAM1",
+            "PLPP3",
+            "F3",
+            "CCL21",
+            "CCL21A",
+            "LYVE1",
+            "CD274",
+            "ALCAM",
+        ]
 
         centrality_df["gene_type"] = centrality_df["gene"].apply(
             lambda gene: "glyco" if gene in glyco_genes else ("trafficking" if gene in trafficking_genes else "other")
@@ -126,13 +161,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Analyze GRN topology")
     parser.add_argument("--grn", required=True, help="Path to GRN CSV file")
     parser.add_argument("--output", required=True, help="Output path prefix for analysis results")
+    parser.add_argument(
+        "--undirected_betweenness",
+        action="store_true",
+        help="Compute betweenness on an undirected version of the network",
+    )
 
     args = parser.parse_args()
 
     grn_df = pd.read_csv(args.grn)
 
     analyzer = GRNAnalyzer(grn_df)
-    centrality = analyzer.compute_centrality_metrics()
+    centrality = analyzer.compute_centrality_metrics(undirected_betweenness=args.undirected_betweenness)
     hubs = analyzer.identify_hubs(centrality, percentile=0.90)
     _ = analyzer.detect_communities()
 

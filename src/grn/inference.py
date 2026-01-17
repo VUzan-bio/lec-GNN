@@ -239,7 +239,13 @@ class GRNInferenceEngine:
         expr_matrix = adata_subset[:, genes_present].to_df()
         return expr_matrix
 
-    def infer_grn(self, expr_matrix: pd.DataFrame, n_workers: int = 4, seed: int = 42) -> pd.DataFrame:
+    def infer_grn(
+        self,
+        expr_matrix: pd.DataFrame,
+        n_workers: int = 4,
+        seed: int = 42,
+        allow_fallback: bool = True,
+    ) -> pd.DataFrame:
         """
         Infer gene regulatory network using GRNBoost2.
 
@@ -247,6 +253,7 @@ class GRNInferenceEngine:
             expr_matrix: cells x genes DataFrame
             n_workers: Number of parallel workers
             seed: Random seed for reproducibility
+            allow_fallback: Allow fallback to scikit-learn GBM if GRNBoost2 fails
 
         Returns:
             DataFrame with columns [TF, target, importance]
@@ -256,10 +263,16 @@ class GRNInferenceEngine:
         except ImportError as exc:
             raise ImportError("arboreto is required for GRNBoost2. Install arboreto.") from exc
 
+        expr_matrix = expr_matrix.fillna(0)
         logger.info("Running GRNBoost2 on %s cells x %s genes", expr_matrix.shape[0], expr_matrix.shape[1])
 
         tfs_in_matrix = [tf for tf in self.tf_list if tf in expr_matrix.columns]
         logger.info("  Using %s TFs as regulators", len(tfs_in_matrix))
+        targets = [gene for gene in expr_matrix.columns if gene not in tfs_in_matrix]
+        if not targets:
+            raise ValueError(
+                "No non-TF targets available for GRNBoost2. Add pathway genes or enable HVG expansion."
+            )
 
         kwargs = {
             "expression_data": expr_matrix,
@@ -276,12 +289,45 @@ class GRNInferenceEngine:
         except (ValueError, TypeError):
             pass
 
-        network = grnboost2(**kwargs)
+        try:
+            network = grnboost2(**kwargs)
+        except Exception as exc:  # pragma: no cover - runtime fallback
+            if not allow_fallback:
+                raise
+            logger.warning("GRNBoost2 failed (%s). Falling back to sklearn GBM.", exc)
+            return self._infer_grn_gbm_fallback(expr_matrix, tfs_in_matrix, targets, seed)
 
         network = network.rename(columns={"regulator": "TF"})
         logger.info("  Inferred %s TF-target interactions", len(network))
 
         return network
+
+    def _infer_grn_gbm_fallback(
+        self,
+        expr_matrix: pd.DataFrame,
+        tf_names: List[str],
+        targets: List[str],
+        seed: int,
+    ) -> pd.DataFrame:
+        """Fallback GRN inference using scikit-learn GradientBoostingRegressor."""
+        try:
+            from sklearn.ensemble import GradientBoostingRegressor
+        except ImportError as exc:
+            raise ImportError("scikit-learn is required for fallback GRN inference.") from exc
+
+        if not tf_names or not targets:
+            raise ValueError("Fallback GRN inference requires TFs and target genes.")
+
+        x = expr_matrix[tf_names].values
+        edges: List[Dict[str, object]] = []
+        for target in targets:
+            y = expr_matrix[target].values
+            model = GradientBoostingRegressor(random_state=seed)
+            model.fit(x, y)
+            for tf, importance in zip(tf_names, model.feature_importances_):
+                edges.append({"TF": tf, "target": target, "importance": float(importance)})
+
+        return pd.DataFrame(edges)
 
     def permutation_test(
         self,
@@ -442,6 +488,11 @@ if __name__ == "__main__":
     parser.add_argument("--use_hvg", action="store_true", help="Include HVGs to reach min genes")
     parser.add_argument("--min_genes", type=int, default=400, help="Minimum genes for GRN")
     parser.add_argument("--max_genes", type=int, default=800, help="Maximum genes for GRN")
+    parser.add_argument(
+        "--no_fallback",
+        action="store_true",
+        help="Disable fallback to sklearn GBM when GRNBoost2 fails",
+    )
 
     args = parser.parse_args()
 
@@ -459,7 +510,12 @@ if __name__ == "__main__":
         max_genes=args.max_genes,
     )
 
-    grn = engine.infer_grn(expr_matrix, n_workers=args.n_workers, seed=args.seed)
+    grn = engine.infer_grn(
+        expr_matrix,
+        n_workers=args.n_workers,
+        seed=args.seed,
+        allow_fallback=not args.no_fallback,
+    )
 
     if args.n_permutations > 0:
         null_dist = engine.permutation_test(
