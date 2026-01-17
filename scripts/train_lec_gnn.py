@@ -7,7 +7,13 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 import torch
-from sklearn.metrics import average_precision_score, roc_auc_score
+from matplotlib import pyplot as plt
+from sklearn.metrics import (
+    average_precision_score,
+    precision_recall_curve,
+    roc_auc_score,
+    roc_curve,
+)
 from sklearn.model_selection import train_test_split
 from torch import nn
 
@@ -303,25 +309,88 @@ def evaluate(
     model: LecGNN,
     loader: DataLoader,
     device: torch.device,
+    criterion: Optional[nn.Module] = None,
 ) -> Dict[str, float]:
     model.eval()
     all_logits = []
     all_labels = []
+    losses = []
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
             logits = model(batch.x, batch.edge_index, batch.node_types, batch.edge_attr, batch.batch)
             all_logits.append(logits.cpu())
             all_labels.append(batch.y.cpu())
+            if criterion is not None:
+                losses.append(float(criterion(logits, batch.y).item()))
     if not all_logits:
-        return {"auc": 0.0, "auprc": 0.0}
+        return {"auc": 0.0, "auprc": 0.0, "loss": 0.0}
     logits = torch.cat(all_logits).numpy()
     labels = torch.cat(all_labels).numpy()
     probs = 1 / (1 + np.exp(-logits))
-    return {
+    metrics = {
         "auc": roc_auc_score(labels, probs),
         "auprc": average_precision_score(labels, probs),
     }
+    if criterion is not None:
+        metrics["loss"] = float(np.mean(losses)) if losses else 0.0
+    return metrics
+
+
+def save_training_plots(history: pd.DataFrame, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(history["epoch"], history["train_loss"], label="train_loss", color="#A3C4DC")
+    ax.plot(history["epoch"], history["val_loss"], label="val_loss", color="#F7C59F")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.set_title("Training/Validation Loss")
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(output_dir / "train_val_loss.png", dpi=300)
+    fig.savefig(output_dir / "train_val_loss.pdf")
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(history["epoch"], history["val_auc"], label="val_auc", color="#B7E4C7")
+    ax.plot(history["epoch"], history["val_auprc"], label="val_auprc", color="#F2B5D4")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Score")
+    ax.set_title("Validation AUC/AUPRC")
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(output_dir / "val_auc_auprc.png", dpi=300)
+    fig.savefig(output_dir / "val_auc_auprc.pdf")
+    plt.close(fig)
+
+
+def save_roc_pr_curves(labels: np.ndarray, probs: np.ndarray, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fpr, tpr, _ = roc_curve(labels, probs)
+    precision, recall, _ = precision_recall_curve(labels, probs)
+
+    fig, ax = plt.subplots(figsize=(5.5, 5))
+    ax.plot(fpr, tpr, color="#9DB4C0", lw=2, label=f"AUC = {roc_auc_score(labels, probs):.3f}")
+    ax.plot([0, 1], [0, 1], linestyle="--", color="#D3D3D3", lw=1)
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
+    ax.set_title("ROC Curve (Test)")
+    ax.legend(frameon=False, loc="lower right")
+    fig.tight_layout()
+    fig.savefig(output_dir / "roc_curve.png", dpi=300)
+    fig.savefig(output_dir / "roc_curve.pdf")
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(5.5, 5))
+    ax.plot(recall, precision, color="#F2B5D4", lw=2, label=f"AUPRC = {average_precision_score(labels, probs):.3f}")
+    ax.set_xlabel("Recall")
+    ax.set_ylabel("Precision")
+    ax.set_title("Precision-Recall Curve (Test)")
+    ax.legend(frameon=False, loc="lower left")
+    fig.tight_layout()
+    fig.savefig(output_dir / "pr_curve.png", dpi=300)
+    fig.savefig(output_dir / "pr_curve.pdf")
+    plt.close(fig)
 
 
 def main() -> None:
@@ -345,6 +414,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--patience", type=int, default=15)
+    parser.add_argument("--plot-dir", default="results/gnn/plots")
+    parser.add_argument("--metrics-csv", default="results/gnn/training_metrics.csv")
     args = parser.parse_args()
 
     set_torch_seed(args.seed)
@@ -418,16 +489,27 @@ def main() -> None:
     best_auc = 0.0
     best_state = None
     patience = args.patience
+    history = []
 
     for epoch in range(1, args.epochs + 1):
         train_loss = train_epoch(model, train_loader, optimizer, criterion, device)
-        val_metrics = evaluate(model, val_loader, device)
+        val_metrics = evaluate(model, val_loader, device, criterion)
         logger.info(
-            "Epoch %d | loss=%.4f | val_auc=%.3f | val_auprc=%.3f",
+            "Epoch %d | loss=%.4f | val_loss=%.4f | val_auc=%.3f | val_auprc=%.3f",
             epoch,
             train_loss,
+            val_metrics["loss"],
             val_metrics["auc"],
             val_metrics["auprc"],
+        )
+        history.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_metrics["loss"],
+                "val_auc": val_metrics["auc"],
+                "val_auprc": val_metrics["auprc"],
+            }
         )
         if val_metrics["auc"] > best_auc:
             best_auc = val_metrics["auc"]
@@ -444,8 +526,34 @@ def main() -> None:
         torch.save(best_state, output_path)
         logger.info("Saved best model to %s", output_path)
 
-    test_metrics = evaluate(model, test_loader, device)
+    test_metrics = evaluate(model, test_loader, device, criterion)
     logger.info("Test AUC: %.3f | Test AUPRC: %.3f", test_metrics["auc"], test_metrics["auprc"])
+
+    history_df = pd.DataFrame(history)
+    metrics_path = Path(args.metrics_csv)
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    history_df.to_csv(metrics_path, index=False)
+    logger.info("Saved training history to %s", metrics_path)
+
+    plot_dir = Path(args.plot_dir)
+    save_training_plots(history_df, plot_dir)
+
+    # Recompute probabilities for ROC/PR curves on test set.
+    model.eval()
+    all_logits = []
+    all_labels = []
+    with torch.no_grad():
+        for batch in test_loader:
+            batch = batch.to(device)
+            logits = model(batch.x, batch.edge_index, batch.node_types, batch.edge_attr, batch.batch)
+            all_logits.append(logits.cpu())
+            all_labels.append(batch.y.cpu())
+    if all_logits:
+        logits = torch.cat(all_logits).numpy()
+        labels = torch.cat(all_labels).numpy()
+        probs = 1 / (1 + np.exp(-logits))
+        save_roc_pr_curves(labels, probs, plot_dir)
+        logger.info("Saved ROC/PR curves to %s", plot_dir)
 
 
 if __name__ == "__main__":
