@@ -452,8 +452,8 @@ class GRNInferenceEngine:
         Args:
             network: GRN from infer_grn()
             null_dist: Null distribution from permutation_test()
-            method: "percentile" (top X%) or "pvalue" (statistical significance)
-            threshold: Percentile cutoff (0.85 = top 15%) or p-value threshold
+            method: "percentile" (top X%), "pvalue" (statistical significance), or "absolute"
+            threshold: Percentile cutoff (0.85 = top 15%), p-value threshold, or absolute importance cutoff
 
         Returns:
             Filtered network DataFrame
@@ -463,6 +463,11 @@ class GRNInferenceEngine:
         if method == "percentile":
             cutoff = network["importance"].quantile(threshold)
             filtered = network[network["importance"] >= cutoff].copy()
+            logger.info("  Retained %s/%s edges", len(filtered), len(network))
+            return filtered
+
+        if method == "absolute":
+            filtered = network[network["importance"] >= threshold].copy()
             logger.info("  Retained %s/%s edges", len(filtered), len(network))
             return filtered
 
@@ -571,7 +576,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_genes", type=int, default=800, help="Maximum genes for GRN")
     parser.add_argument(
         "--filter_method",
-        choices=["percentile", "pvalue"],
+        choices=["percentile", "pvalue", "absolute"],
         default=None,
         help="Filtering method for high-confidence edges",
     )
@@ -579,7 +584,7 @@ if __name__ == "__main__":
         "--filter_threshold",
         type=float,
         default=None,
-        help="Threshold for filtering (percentile or p-value depending on method)",
+        help="Threshold for filtering (percentile, p-value, or absolute importance cutoff)",
     )
     parser.add_argument(
         "--no_fallback",
